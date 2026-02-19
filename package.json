@@ -1,0 +1,21 @@
+{
+  "name": "datavalidator",
+  "version": "1.0.0",
+  "description": "Upload CSV, run Twilio Lookup Identity Match per row, download results.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "csv-parse": "^5.5.6",
+    "csv-stringify": "^6.5.1",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.0",
+    "multer": "^1.4.5-lts.1",
+    "twilio": "^5.3.4"
+  }
+}

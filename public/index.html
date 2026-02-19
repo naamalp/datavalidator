@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Data Validator – Twilio Identity Match</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --surface: #1a2332;
+      --border: #2d3a4f;
+      --text: #e6edf3;
+      --muted: #8b9cb3;
+      --accent: #58a6ff;
+      --accent-hover: #79b8ff;
+      --error: #f85149;
+      --success: #3fb950;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', monospace;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem;
+    }
+    main {
+      width: 100%;
+      max-width: 960px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0 0 0.5rem;
+      letter-spacing: -0.02em;
+    }
+    p.sub {
+      color: var(--muted);
+      font-size: 0.875rem;
+      margin: 0 0 1.5rem;
+    }
+    .upload-zone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-align: center;
+      margin-bottom: 1rem;
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .upload-zone.dragover { border-color: var(--accent); background: rgba(88, 166, 255, 0.06); }
+    .upload-zone input[type="file"] { display: none; }
+    .upload-zone label {
+      cursor: pointer;
+      color: var(--accent);
+      font-size: 0.9rem;
+    }
+    .upload-zone label:hover { color: var(--accent-hover); }
+    .file-name {
+      margin-top: 0.5rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    button[type="submit"] {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      font: inherit;
+      font-size: 0.9rem;
+      color: var(--bg);
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button[type="submit"]:hover:not(:disabled) { background: var(--accent-hover); }
+    button[type="submit"]:disabled { opacity: 0.6; cursor: not-allowed; }
+    .form-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .form-actions button { flex: 1; min-width: 140px; }
+    .form-actions button#preview-only {
+      background: var(--border);
+      color: var(--text);
+    }
+    .form-actions button#preview-only:hover:not(:disabled) { background: var(--muted); color: var(--bg); }
+    .status {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border-radius: 8px;
+      font-size: 0.875rem;
+    }
+    .status.processing { background: rgba(88, 166, 255, 0.12); color: var(--accent); }
+    .status.error { background: rgba(248, 81, 73, 0.12); color: var(--error); }
+    .status.success { background: rgba(63, 185, 80, 0.12); color: var(--success); }
+    .status a { color: var(--accent); }
+    .status a:hover { text-decoration: underline; }
+    .help {
+      margin-top: 1.5rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.75rem;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    #results-section { display: none; margin-top: 1.5rem; }
+    #results-section.visible { display: block; }
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .summary-card {
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+    }
+    .summary-card h3 {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin: 0 0 0.5rem;
+    }
+    .summary-card ul {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      font-size: 0.8rem;
+    }
+    .summary-card li { margin: 0.2rem 0; }
+    .summary-card .value { color: var(--accent); font-weight: 500; }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+    .results-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+    .results-table th,
+    .results-table td {
+      padding: 0.5rem 0.75rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .results-table th {
+      position: sticky;
+      top: 0;
+      background: var(--surface);
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .results-table tr:last-child td { border-bottom: none; }
+    .results-table tr:hover td { background: rgba(88, 166, 255, 0.04); }
+    .match-exact { color: var(--success); }
+    .match-none { color: var(--error); }
+    .results-actions {
+      margin-top: 0.75rem;
+      display: flex;
+      gap: 0.5rem;
+    }
+    .results-actions button {
+      padding: 0.5rem 1rem;
+      font: inherit;
+      font-size: 0.85rem;
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .results-actions button:hover { background: var(--accent); color: var(--bg); }
+    .results-actions button.download { background: var(--accent); color: var(--bg); }
+    .results-actions button.download:hover { background: var(--accent-hover); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Data Validator</h1>
+    <p class="sub">Twilio Lookup Identity Match</p>
+
+    <form id="form">
+      <div class="upload-zone" id="zone">
+        <input type="file" id="file" name="csv" accept=".csv" required>
+        <label for="file">Choose a CSV file</label>
+        <div class="file-name" id="fileName"></div>
+      </div>
+      <div class="form-actions">
+        <button type="submit" id="submit">Process with Identity Match</button>
+        <button type="button" id="preview-only">Preview only (no API cost)</button>
+      </div>
+    </form>
+
+    <div id="status"></div>
+
+    <section id="results-section">
+      <div class="summary" id="summary"></div>
+      <div class="table-wrap">
+        <table class="results-table" id="results-table">
+          <thead id="results-thead"></thead>
+          <tbody id="results-tbody"></tbody>
+        </table>
+      </div>
+      <div class="results-actions">
+        <button type="button" id="find-names">Find names</button>
+        <button type="button" class="download" id="download-csv">Download CSV</button>
+      </div>
+    </section>
+
+    <div class="help">
+      CSV must be UTF-8. Column 1 = phone number, column 4 = First name, column 5 = Last name.
+      Results add: first_name_match, last_name_match, summary_score, identity_match_error.
+    </div>
+  </main>
+
+  <script>
+    const form = document.getElementById('form');
+    const fileInput = document.getElementById('file');
+    const fileNameEl = document.getElementById('fileName');
+    const submitBtn = document.getElementById('submit');
+    const statusEl = document.getElementById('status');
+    const zone = document.getElementById('zone');
+    const resultsSection = document.getElementById('results-section');
+    const summaryEl = document.getElementById('summary');
+    const thead = document.getElementById('results-thead');
+    const tbody = document.getElementById('results-tbody');
+    const downloadCsvBtn = document.getElementById('download-csv');
+    const findNamesBtn = document.getElementById('find-names');
+    const previewOnlyBtn = document.getElementById('preview-only');
+
+    let lastResult = null;
+
+    function setStatus(className, html) {
+      statusEl.className = 'status ' + (className || '');
+      statusEl.innerHTML = html;
+    }
+
+    function countByColumn(rows, headerIndex) {
+      const counts = {};
+      for (const row of rows) {
+        const val = (row[headerIndex] ?? '').toString().trim() || '(empty)';
+        counts[val] = (counts[val] || 0) + 1;
+      }
+      return counts;
+    }
+
+    function renderSummary(headers, rows) {
+      const first = headers.indexOf('first_name_match');
+      const last = headers.indexOf('last_name_match');
+      const summary = headers.indexOf('summary_score');
+      const cols = [
+        { key: 'first_name_match', label: 'First name match', idx: first },
+        { key: 'last_name_match', label: 'Last name match', idx: last },
+        { key: 'summary_score', label: 'Summary score', idx: summary },
+      ];
+
+      summaryEl.innerHTML = cols.map(({ label, idx }) => {
+        const counts = countByColumn(rows, idx);
+        const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        const list = sorted.map(([value, n]) => `<li><span class="value">${escapeHtml(value)}</span>: ${n}</li>`).join('');
+        return `<div class="summary-card"><h3>${escapeHtml(label)}</h3><ul>${list}</ul></div>`;
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
+
+    function csvCell(val) {
+      const s = (val ?? '').toString();
+      if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+      return s;
+    }
+
+    function isNoMatchOrBlank(val) {
+      const s = (val ?? '').toString().trim();
+      return s === '' || s === 'no_match';
+    }
+
+    async function findNames() {
+      if (!lastResult) return;
+      const { headers, rows } = lastResult;
+      const phoneCol = 0;
+      const firstMatchIdx = headers.indexOf('first_name_match');
+      const lastMatchIdx = headers.indexOf('last_name_match');
+      if (firstMatchIdx === -1 || lastMatchIdx === -1) return;
+
+      const phonesToLookup = [];
+      const seen = new Set();
+      for (const row of rows) {
+        const first = row[firstMatchIdx];
+        const last = row[lastMatchIdx];
+        if (isNoMatchOrBlank(first) && isNoMatchOrBlank(last)) {
+          const phone = (row[phoneCol] ?? '').toString().trim();
+          if (phone && !seen.has(phone)) {
+            seen.add(phone);
+            phonesToLookup.push(phone);
+          }
+        }
+      }
+
+      if (phonesToLookup.length === 0) {
+        setStatus('success', 'No rows where both first and last name match are no_match or blank.');
+        return;
+      }
+
+      findNamesBtn.disabled = true;
+      setStatus('processing', `Finding caller names for ${phonesToLookup.length} number(s)…`);
+
+      try {
+        const res = await fetch('/api/caller-name', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phoneNumbers: phonesToLookup }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || res.statusText);
+        }
+        const data = await res.json();
+        const phoneToName = new Map();
+        for (const r of data.results) {
+          const key = (r.phone ?? '').toString().trim();
+          const name = (r.caller_name ?? '').toString().trim();
+          const err = (r.error ?? '').toString().trim();
+          phoneToName.set(key, err ? `Error: ${err}` : name);
+        }
+
+        let callerNameIdx = headers.indexOf('caller_name');
+        if (callerNameIdx === -1) {
+          headers.push('caller_name');
+          callerNameIdx = headers.length - 1;
+          for (const row of rows) row.push('');
+        }
+
+        for (const row of rows) {
+          const first = row[firstMatchIdx];
+          const last = row[lastMatchIdx];
+          if (isNoMatchOrBlank(first) && isNoMatchOrBlank(last)) {
+            const phone = (row[phoneCol] ?? '').toString().trim();
+            row[callerNameIdx] = phoneToName.get(phone) ?? '';
+          }
+        }
+
+        lastResult.headers = headers;
+        lastResult.rows = rows;
+        renderTable(headers, rows);
+        setStatus('success', `Caller name lookup done. Filled ${phonesToLookup.length} number(s).`);
+      } catch (err) {
+        setStatus('error', err.message || 'Caller name lookup failed.');
+      } finally {
+        findNamesBtn.disabled = false;
+      }
+    }
+
+    function downloadAsCsv() {
+      if (!lastResult) return;
+      const { headers, rows, filename } = lastResult;
+      const line = (row) => row.map(csvCell).join(',');
+      const csv = [line(headers), ...rows.map(line)].join('\r\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || 'identity-match-results.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function renderTable(headers, rows) {
+      thead.innerHTML = '<tr>' + headers.map(h => `<th>${escapeHtml(h)}</th>`).join('') + '</tr>';
+      const firstMatchIdx = headers.indexOf('first_name_match');
+      const lastMatchIdx = headers.indexOf('last_name_match');
+      tbody.innerHTML = rows.map(row => {
+        const cells = row.map((cell, i) => {
+          const val = (cell ?? '').toString();
+          let cls = '';
+          if (i === firstMatchIdx || i === lastMatchIdx) {
+            if (val === 'exact_match') cls = ' class="match-exact"';
+            else if (val === 'no_match') cls = ' class="match-none"';
+          }
+          return `<td${cls}>${escapeHtml(val)}</td>`;
+        }).join('');
+        return '<tr>' + cells + '</tr>';
+      }).join('');
+    }
+
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files[0];
+      fileNameEl.textContent = file ? file.name : '';
+    });
+
+    zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dragover'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+    zone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      zone.classList.remove('dragover');
+      const file = e.dataTransfer.files[0];
+      if (file && file.name.toLowerCase().endsWith('.csv')) {
+        fileInput.files = e.dataTransfer.files;
+        fileNameEl.textContent = file.name;
+      }
+    });
+
+    downloadCsvBtn.addEventListener('click', downloadAsCsv);
+    findNamesBtn.addEventListener('click', findNames);
+
+    async function submitCsv(usePreview) {
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      submitBtn.disabled = true;
+      previewOnlyBtn.disabled = true;
+      resultsSection.classList.remove('visible');
+      setStatus('processing', usePreview
+        ? 'Loading preview…'
+        : 'Processing… Calling Twilio Identity Match for each row.');
+
+      const formData = new FormData();
+      formData.append('csv', file);
+      const url = usePreview ? '/api/preview' : '/api/process';
+
+      try {
+        const res = await fetch(url, { method: 'POST', body: formData });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || res.statusText || 'Request failed');
+        }
+
+        const data = await res.json();
+        lastResult = data;
+        const { headers, rows } = data;
+
+        renderSummary(headers, rows);
+        renderTable(headers, rows);
+        resultsSection.classList.add('visible');
+        setStatus('success', usePreview
+          ? `Preview only — no Identity Match API calls. ${rows.length} row(s). Use Find names or Download CSV.`
+          : `Done. ${rows.length} row(s) processed. Preview below.`);
+      } catch (err) {
+        setStatus('error', err.message || 'Something went wrong.');
+      } finally {
+        submitBtn.disabled = false;
+        previewOnlyBtn.disabled = false;
+      }
+    }
+
+    previewOnlyBtn.addEventListener('click', () => submitCsv(true));
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitCsv(false);
+    });
+  </script>
+</body>
+</html>
