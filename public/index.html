@@ -223,6 +223,7 @@
       </div>
       <div class="results-actions">
         <button type="button" id="find-names">Find names</button>
+        <button type="button" id="resume-process" style="display:none;">Resume Identity Match</button>
         <button type="button" class="download" id="download-csv">Download CSV</button>
       </div>
     </section>
@@ -247,12 +248,125 @@
     const downloadCsvBtn = document.getElementById('download-csv');
     const findNamesBtn = document.getElementById('find-names');
     const previewOnlyBtn = document.getElementById('preview-only');
+    const resumeProcessBtn = document.getElementById('resume-process');
 
     let lastResult = null;
+    let lastFileKey = null;
+    let isProcessingIdentityMatch = false;
+    const CHUNK_SIZE = 20;
 
     function setStatus(className, html) {
       statusEl.className = 'status ' + (className || '');
       statusEl.innerHTML = html;
+    }
+
+    function buildFileKey(file) {
+      const name = file?.name || '';
+      const size = file?.size || 0;
+      const lm = file?.lastModified || 0;
+      return `datavalidator:${name}:${size}:${lm}`;
+    }
+
+    function saveCheckpoint() {
+      if (!lastFileKey || !lastResult) return;
+      try {
+        localStorage.setItem(lastFileKey, JSON.stringify(lastResult));
+      } catch (_) {
+        // ignore quota errors
+      }
+    }
+
+    function loadCheckpoint(fileKey) {
+      if (!fileKey) return null;
+      try {
+        const raw = localStorage.getItem(fileKey);
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function rowIsProcessed(row, headers) {
+      const f = headers.indexOf('first_name_match');
+      const l = headers.indexOf('last_name_match');
+      const s = headers.indexOf('summary_score');
+      const e = headers.indexOf('identity_match_error');
+      const hasAny =
+        ((row[f] ?? '').toString().trim() !== '') ||
+        ((row[l] ?? '').toString().trim() !== '') ||
+        ((row[s] ?? '').toString().trim() !== '');
+      const hasErr = ((row[e] ?? '').toString().trim() !== '');
+      return hasAny && !hasErr;
+    }
+
+    function nextUnprocessedIndex(rows, headers) {
+      for (let i = 0; i < rows.length; i++) {
+        if (!rowIsProcessed(rows[i], headers)) return i;
+      }
+      return -1;
+    }
+
+    async function processIdentityMatchInChunks() {
+      if (!lastResult || isProcessingIdentityMatch) return;
+      const { headers, rows } = lastResult;
+
+      const startIdx = nextUnprocessedIndex(rows, headers);
+      if (startIdx === -1) {
+        setStatus('success', `Identity Match already complete. ${rows.length} row(s).`);
+        resumeProcessBtn.style.display = 'none';
+        return;
+      }
+
+      isProcessingIdentityMatch = true;
+      resumeProcessBtn.style.display = 'none';
+      submitBtn.disabled = true;
+      previewOnlyBtn.disabled = true;
+      findNamesBtn.disabled = true;
+
+      try {
+        let idx = startIdx;
+        while (idx !== -1) {
+          const remaining = rows.length - idx;
+          const take = Math.min(CHUNK_SIZE, remaining);
+          const chunk = rows.slice(idx, idx + take);
+
+          setStatus('processing', `Processing Identity Match… ${idx}/${rows.length} (chunk ${take})`);
+
+          const res = await fetch('/api/process-chunk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rows: chunk }),
+          });
+          if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.error || res.statusText || 'Chunk request failed');
+          }
+          const data = await res.json();
+          const updated = data.rows || [];
+          for (let j = 0; j < updated.length; j++) {
+            rows[idx + j] = updated[j];
+          }
+
+          lastResult.rows = rows;
+          renderSummary(headers, rows);
+          renderTable(headers, rows);
+          saveCheckpoint();
+
+          idx = nextUnprocessedIndex(rows, headers);
+        }
+
+        setStatus('success', `Done. ${rows.length} row(s) processed. Preview below.`);
+      } catch (err) {
+        // Keep partial results in-table and allow resuming without reprocessing completed rows.
+        saveCheckpoint();
+        resumeProcessBtn.style.display = 'inline-block';
+        setStatus('error', (err.message || 'Processing failed.') + ' Partial results kept. Click “Resume Identity Match” to continue.');
+      } finally {
+        isProcessingIdentityMatch = false;
+        submitBtn.disabled = false;
+        previewOnlyBtn.disabled = false;
+        findNamesBtn.disabled = false;
+      }
     }
 
     function countByColumn(rows, headerIndex) {
@@ -426,6 +540,7 @@
 
     downloadCsvBtn.addEventListener('click', downloadAsCsv);
     findNamesBtn.addEventListener('click', findNames);
+    resumeProcessBtn.addEventListener('click', processIdentityMatchInChunks);
 
     async function submitCsv(usePreview) {
       const file = fileInput.files[0];
@@ -440,7 +555,7 @@
 
       const formData = new FormData();
       formData.append('csv', file);
-      const url = usePreview ? '/api/preview' : '/api/process';
+      const url = '/api/preview';
 
       try {
         const res = await fetch(url, { method: 'POST', body: formData });
@@ -450,16 +565,31 @@
           throw new Error(data.error || res.statusText || 'Request failed');
         }
 
-        const data = await res.json();
-        lastResult = data;
-        const { headers, rows } = data;
+        const preview = await res.json();
+        lastResult = preview;
+        lastFileKey = buildFileKey(file);
 
-        renderSummary(headers, rows);
-        renderTable(headers, rows);
+        // If we have a checkpoint for this exact file, merge it (so we can resume after refresh).
+        const checkpoint = loadCheckpoint(lastFileKey);
+        if (checkpoint && Array.isArray(checkpoint.headers) && Array.isArray(checkpoint.rows)) {
+          // Prefer checkpoint rows (they contain partial results), but keep latest filename.
+          lastResult = { ...checkpoint, filename: preview.filename };
+        }
+
+        renderSummary(lastResult.headers, lastResult.rows);
+        renderTable(lastResult.headers, lastResult.rows);
         resultsSection.classList.add('visible');
-        setStatus('success', usePreview
-          ? `Preview only — no Identity Match API calls. ${rows.length} row(s). Use Find names or Download CSV.`
-          : `Done. ${rows.length} row(s) processed. Preview below.`);
+        const firstUnprocessed = nextUnprocessedIndex(lastResult.rows, lastResult.headers);
+        resumeProcessBtn.style.display = firstUnprocessed === -1 ? 'none' : 'inline-block';
+
+        if (usePreview) {
+          setStatus('success', `Preview only — no Identity Match API calls. ${lastResult.rows.length} row(s). Use Find names or Download CSV.`);
+        } else {
+          // Start chunked processing after preview is loaded.
+          setStatus('processing', `Starting Identity Match… ${lastResult.rows.length} row(s).`);
+          saveCheckpoint();
+          await processIdentityMatchInChunks();
+        }
       } catch (err) {
         setStatus('error', err.message || 'Something went wrong.');
       } finally {

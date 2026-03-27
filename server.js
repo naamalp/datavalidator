@@ -56,6 +56,10 @@ const upload = multer({
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+function isResultEmpty(v) {
+  return (v ?? '').toString().trim() === '';
+}
+
 function getTwilioClient() {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
@@ -96,6 +100,58 @@ async function identityMatch(client, phoneNumber, firstName, lastName) {
     };
   }
 }
+
+app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) => {
+  const rows = req.body?.rows;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ error: 'rows array is required' });
+  }
+
+  let client;
+  try {
+    client = getTwilioClient();
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+
+  const updatedRows = [];
+  for (const row of rows) {
+    if (!Array.isArray(row)) {
+      updatedRows.push(row);
+      continue;
+    }
+
+    const firstNameMatch = row[row.length - 4];
+    const lastNameMatch = row[row.length - 3];
+    const summaryScore = row[row.length - 2];
+    const identityMatchError = row[row.length - 1];
+
+    // If we've already processed this row successfully, skip re-calling Twilio
+    const alreadyProcessed =
+      (!isResultEmpty(firstNameMatch) || !isResultEmpty(lastNameMatch) || !isResultEmpty(summaryScore)) &&
+      isResultEmpty(identityMatchError);
+    if (alreadyProcessed) {
+      updatedRows.push(row);
+      continue;
+    }
+
+    const phone = (row[COL_PHONE] ?? '').toString().trim();
+    const firstName = (row[COL_FIRST_NAME] ?? '').toString();
+    const lastName = (row[COL_LAST_NAME] ?? '').toString();
+
+    const result = await identityMatch(client, phone, firstName, lastName);
+    const base = row.slice(0, row.length - RESULT_COLUMNS.length);
+    updatedRows.push([
+      ...base,
+      result.first_name_match,
+      result.last_name_match,
+      result.summary_score,
+      result.identity_match_error,
+    ]);
+  }
+
+  res.json({ rows: updatedRows });
+});
 
 async function callerNameLookup(client, phoneNumber) {
   const phone = (phoneNumber || '').toString().trim();
@@ -197,46 +253,9 @@ app.post('/api/preview', upload.single('csv'), (req, res) => {
   res.json({ headers: outputHeader, rows, filename });
 });
 
-app.post('/api/process', upload.single('csv'), async (req, res) => {
-  if (!req.file || !req.file.buffer) {
-    return res.status(400).json({ error: 'No CSV file uploaded' });
-  }
-
-  let parsed;
-  try {
-    parsed = parseAndValidateCsv(req.file.buffer);
-  } catch (e) {
-    return res.status(400).json({ error: e.message || 'Invalid CSV' });
-  }
-
-  let client;
-  try {
-    client = getTwilioClient();
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
-  }
-
-  const { header, records } = parsed;
-  const outputHeader = [...header, ...RESULT_COLUMNS];
-  const outputRows = [];
-
-  for (let i = 1; i < records.length; i++) {
-    const row = records[i];
-    const phone = (row[COL_PHONE] ?? '').toString().trim();
-    const firstName = (row[COL_FIRST_NAME] ?? '').toString();
-    const lastName = (row[COL_LAST_NAME] ?? '').toString();
-
-    const result = await identityMatch(client, phone, firstName, lastName);
-    outputRows.push([...row, result.first_name_match, result.last_name_match, result.summary_score, result.identity_match_error]);
-  }
-
-  const headers = outputHeader;
-  const rows = outputRows;
-
-  res.json({
-    headers,
-    rows,
-    filename: (req.file.originalname || 'upload.csv').replace(/\.csv$/i, '') + '-identity-match-results.csv',
+app.post('/api/process', (_req, res) => {
+  res.status(410).json({
+    error: 'Deprecated endpoint. Use /api/preview and /api/process-chunk for resumable processing.',
   });
 });
 
