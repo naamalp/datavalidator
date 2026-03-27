@@ -72,6 +72,10 @@ function getTwilioClient() {
   return twilio(accountSid, authToken, options);
 }
 
+const USE_MOCK_IDENTITY_MATCH = /^(1|true|yes)$/i.test(
+  (process.env.TWILIO_MOCK_IDENTITY_MATCH || '').trim()
+);
+
 async function identityMatch(client, phoneNumber, firstName, lastName) {
   try {
     const result = await client.lookups.v2
@@ -107,11 +111,13 @@ app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) 
     return res.status(400).json({ error: 'rows array is required' });
   }
 
-  let client;
-  try {
-    client = getTwilioClient();
-  } catch (e) {
-    return res.status(500).json({ error: e.message });
+  let client = null;
+  if (!USE_MOCK_IDENTITY_MATCH) {
+    try {
+      client = getTwilioClient();
+    } catch (e) {
+      return res.status(500).json({ error: e.message });
+    }
   }
 
   const updatedRows = [];
@@ -128,8 +134,10 @@ app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) 
 
     // If we've already processed this row successfully, skip re-calling Twilio
     const alreadyProcessed =
-      (!isResultEmpty(firstNameMatch) || !isResultEmpty(lastNameMatch) || !isResultEmpty(summaryScore)) &&
-      isResultEmpty(identityMatchError);
+      !isResultEmpty(firstNameMatch) ||
+      !isResultEmpty(lastNameMatch) ||
+      !isResultEmpty(summaryScore) ||
+      !isResultEmpty(identityMatchError);
     if (alreadyProcessed) {
       updatedRows.push(row);
       continue;
@@ -139,7 +147,14 @@ app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) 
     const firstName = (row[COL_FIRST_NAME] ?? '').toString();
     const lastName = (row[COL_LAST_NAME] ?? '').toString();
 
-    const result = await identityMatch(client, phone, firstName, lastName);
+    const result = USE_MOCK_IDENTITY_MATCH
+      ? {
+          first_name_match: firstName.trim() ? 'exact_match' : 'no_match',
+          last_name_match: lastName.trim() ? 'exact_match' : 'no_match',
+          summary_score: (firstName.trim() && lastName.trim()) ? 'high' : 'low',
+          identity_match_error: '',
+        }
+      : await identityMatch(client, phone, firstName, lastName);
     const base = row.slice(0, row.length - RESULT_COLUMNS.length);
     updatedRows.push([
       ...base,
@@ -263,12 +278,19 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`Data Validator running at http://localhost:${PORT}`);
-  if (process.env.TWILIO_MOCK_BASE_URL) {
-    console.log('Twilio requests redirected to mock:', process.env.TWILIO_MOCK_BASE_URL);
-  }
-  if (USE_MOCK_CALLER_NAME) {
-    console.log('Caller Name using inline mock (no API cost). Set TWILIO_MOCK_CALLER_NAME=0 to use real API.');
-  }
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Data Validator running at http://localhost:${PORT}`);
+    if (process.env.TWILIO_MOCK_BASE_URL) {
+      console.log('Twilio requests redirected to mock:', process.env.TWILIO_MOCK_BASE_URL);
+    }
+    if (USE_MOCK_IDENTITY_MATCH) {
+      console.log('Identity Match using inline mock (no API cost). Set TWILIO_MOCK_IDENTITY_MATCH=0 to use real API.');
+    }
+    if (USE_MOCK_CALLER_NAME) {
+      console.log('Caller Name using inline mock (no API cost). Set TWILIO_MOCK_CALLER_NAME=0 to use real API.');
+    }
+  });
+}
+
+module.exports = app;

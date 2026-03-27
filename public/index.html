@@ -296,7 +296,8 @@
         ((row[l] ?? '').toString().trim() !== '') ||
         ((row[s] ?? '').toString().trim() !== '');
       const hasErr = ((row[e] ?? '').toString().trim() !== '');
-      return hasAny && !hasErr;
+      // Treat error rows as attempted so chunked processing can continue past them.
+      return hasAny || hasErr;
     }
 
     function nextUnprocessedIndex(rows, headers) {

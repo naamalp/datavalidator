@@ -69,17 +69,18 @@ Then open **http://localhost:3000**, upload a CSV, and use **Process with Identi
 
 ## Testing without API cost (mocks)
 
-To test the **Find names** feature without incurring Twilio Caller Name API costs you can use either approach below.
+To test both **Identity Match** and **Find names** without incurring Twilio API costs you can use either approach below.
 
 ### Option 1: Inline mock (simplest)
 
 Set in `.env`:
 
 ```env
+TWILIO_MOCK_IDENTITY_MATCH=1
 TWILIO_MOCK_CALLER_NAME=1
 ```
 
-Restart the app. **Find names** will return fake caller names (e.g. `Mock Caller (1234)`) without calling Twilio. No Prism or external mock server needed.
+Restart the app. **Process with Identity Match** and **Find names** will use inline mock responses (no Twilio API calls). This is the easiest way to validate chunking/resume behavior without cost.
 
 ### Option 2: Prism mock server
 
