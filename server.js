@@ -86,11 +86,19 @@ async function identityMatch(client, phoneNumber, firstName, lastName) {
         lastName: (lastName || '').trim(),
       });
     const im = result.identityMatch || {};
+    const firstNameMatch = im.first_name_match ?? im.firstNameMatch ?? '';
+    const lastNameMatch = im.last_name_match ?? im.lastNameMatch ?? '';
+    const summaryScore = im.summary_score ?? im.summaryScore ?? '';
+    const noResult =
+      isResultEmpty(firstNameMatch) &&
+      isResultEmpty(lastNameMatch) &&
+      isResultEmpty(summaryScore);
     return {
-      first_name_match: im.first_name_match ?? im.firstNameMatch ?? '',
-      last_name_match: im.last_name_match ?? im.lastNameMatch ?? '',
-      summary_score: im.summary_score ?? im.summaryScore ?? '',
-      identity_match_error: '',
+      first_name_match: firstNameMatch,
+      last_name_match: lastNameMatch,
+      summary_score: summaryScore,
+      // Mark blank responses as attempted so chunk processing can advance.
+      identity_match_error: noResult ? 'no_result' : '',
     };
   } catch (err) {
     const code = err.code != null ? err.code : '';

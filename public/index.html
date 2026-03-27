@@ -307,6 +307,14 @@
       return -1;
     }
 
+    function countProcessedRows(rows, headers) {
+      let n = 0;
+      for (const row of rows) {
+        if (rowIsProcessed(row, headers)) n++;
+      }
+      return n;
+    }
+
     async function processIdentityMatchInChunks() {
       if (!lastResult || isProcessingIdentityMatch) return;
       const { headers, rows } = lastResult;
@@ -330,8 +338,9 @@
           const remaining = rows.length - idx;
           const take = Math.min(CHUNK_SIZE, remaining);
           const chunk = rows.slice(idx, idx + take);
+          const beforeProcessed = countProcessedRows(rows, headers);
 
-          setStatus('processing', `Processing Identity Match… ${idx}/${rows.length} (chunk ${take})`);
+          setStatus('processing', `Processing Identity Match… ${beforeProcessed}/${rows.length} completed (chunk ${take})`);
 
           const res = await fetch('/api/process-chunk', {
             method: 'POST',
@@ -352,6 +361,11 @@
           renderSummary(headers, rows);
           renderTable(headers, rows);
           saveCheckpoint();
+          const afterProcessed = countProcessedRows(rows, headers);
+          setStatus('processing', `Processing Identity Match… ${afterProcessed}/${rows.length} completed`);
+
+          // Give the browser a chance to repaint between chunks.
+          await new Promise((resolve) => requestAnimationFrame(resolve));
 
           idx = nextUnprocessedIndex(rows, headers);
         }
