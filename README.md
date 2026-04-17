@@ -82,6 +82,20 @@ TWILIO_MOCK_CALLER_NAME=1
 
 Restart the app. **Process with Identity Match** and **Find names** will use inline mock responses (no Twilio API calls). This is the easiest way to validate chunking/resume behavior without cost.
 
+### Identity Match speed tuning
+
+`/api/process-chunk` supports bounded parallel lookups per request using:
+
+```env
+IDENTITY_MATCH_CONCURRENCY=8
+```
+
+Recommended tuning approach:
+
+1. Start at `8`
+2. Increase gradually with production-like files
+3. If 429s/timeouts increase, step back to the previous stable value
+
 ### Option 2: Prism mock server
 
 You can redirect Twilio API requests to a local [Prism](https://stoplight.io/open-source/prism) mock server generated from [Twilio’s OpenAPI spec](https://www.twilio.com/docs/openapi/mock-api-generation-with-twilio-openapi-spec).

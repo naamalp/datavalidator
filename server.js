@@ -75,6 +75,10 @@ function getTwilioClient() {
 const USE_MOCK_IDENTITY_MATCH = /^(1|true|yes)$/i.test(
   (process.env.TWILIO_MOCK_IDENTITY_MATCH || '').trim()
 );
+const IDENTITY_MATCH_CONCURRENCY = Math.max(
+  1,
+  Number.parseInt((process.env.IDENTITY_MATCH_CONCURRENCY || '8').trim(), 10) || 8
+);
 
 async function identityMatch(client, phoneNumber, firstName, lastName) {
   try {
@@ -128,50 +132,78 @@ app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) 
     }
   }
 
-  const updatedRows = [];
-  for (const row of rows) {
-    if (!Array.isArray(row)) {
-      updatedRows.push(row);
-      continue;
-    }
+  const updatedRows = new Array(rows.length);
+  const tupleCache = new Map();
 
-    const firstNameMatch = row[row.length - 4];
-    const lastNameMatch = row[row.length - 3];
-    const summaryScore = row[row.length - 2];
-    const identityMatchError = row[row.length - 1];
-
-    // If we've already processed this row successfully, skip re-calling Twilio
-    const alreadyProcessed =
-      !isResultEmpty(firstNameMatch) ||
-      !isResultEmpty(lastNameMatch) ||
-      !isResultEmpty(summaryScore) ||
-      !isResultEmpty(identityMatchError);
-    if (alreadyProcessed) {
-      updatedRows.push(row);
-      continue;
-    }
-
-    const phone = (row[COL_PHONE] ?? '').toString().trim();
-    const firstName = (row[COL_FIRST_NAME] ?? '').toString();
-    const lastName = (row[COL_LAST_NAME] ?? '').toString();
-
-    const result = USE_MOCK_IDENTITY_MATCH
-      ? {
-          first_name_match: firstName.trim() ? 'exact_match' : 'no_match',
-          last_name_match: lastName.trim() ? 'exact_match' : 'no_match',
-          summary_score: (firstName.trim() && lastName.trim()) ? 'high' : 'low',
-          identity_match_error: '',
-        }
-      : await identityMatch(client, phone, firstName, lastName);
+  function mapResultToRow(row, result) {
     const base = row.slice(0, row.length - RESULT_COLUMNS.length);
-    updatedRows.push([
+    return [
       ...base,
       result.first_name_match,
       result.last_name_match,
       result.summary_score,
       result.identity_match_error,
-    ]);
+    ];
   }
+
+  function mockIdentityMatch(firstName, lastName) {
+    return {
+      first_name_match: firstName.trim() ? 'exact_match' : 'no_match',
+      last_name_match: lastName.trim() ? 'exact_match' : 'no_match',
+      summary_score: (firstName.trim() && lastName.trim()) ? 'high' : 'low',
+      identity_match_error: '',
+    };
+  }
+
+  async function processRow(row) {
+    const firstNameMatch = row[row.length - 4];
+    const lastNameMatch = row[row.length - 3];
+    const summaryScore = row[row.length - 2];
+    const identityMatchError = row[row.length - 1];
+
+    // If we've already attempted this row, don't call Twilio again.
+    const alreadyProcessed =
+      !isResultEmpty(firstNameMatch) ||
+      !isResultEmpty(lastNameMatch) ||
+      !isResultEmpty(summaryScore) ||
+      !isResultEmpty(identityMatchError);
+    if (alreadyProcessed) return row;
+
+    const phone = (row[COL_PHONE] ?? '').toString().trim();
+    const firstName = (row[COL_FIRST_NAME] ?? '').toString();
+    const lastName = (row[COL_LAST_NAME] ?? '').toString();
+    const tupleKey = `${phone}\u0001${firstName}\u0001${lastName}`;
+
+    if (!tupleCache.has(tupleKey)) {
+      const promise = USE_MOCK_IDENTITY_MATCH
+        ? Promise.resolve(mockIdentityMatch(firstName, lastName))
+        : identityMatch(client, phone, firstName, lastName);
+      tupleCache.set(tupleKey, promise);
+    }
+    const result = await tupleCache.get(tupleKey);
+    return mapResultToRow(row, result);
+  }
+
+  async function runPool(items, worker, concurrency) {
+    let cursor = 0;
+    const runners = new Array(Math.min(concurrency, items.length)).fill(0).map(async () => {
+      while (true) {
+        const current = cursor;
+        cursor += 1;
+        if (current >= items.length) return;
+        await worker(items[current], current);
+      }
+    });
+    await Promise.all(runners);
+  }
+
+  await runPool(rows, async (row, idx) => {
+    if (!Array.isArray(row)) {
+      updatedRows[idx] = row;
+      return;
+    }
+    updatedRows[idx] = await processRow(row);
+  }, IDENTITY_MATCH_CONCURRENCY);
 
   res.json({ rows: updatedRows });
 });
