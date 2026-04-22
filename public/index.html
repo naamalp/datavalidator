@@ -192,11 +192,60 @@
     .results-actions button:hover { background: var(--accent); color: var(--bg); }
     .results-actions button.download { background: var(--accent); color: var(--bg); }
     .results-actions button.download:hover { background: var(--accent-hover); }
+    .auth-card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2rem;
+    }
+    .auth-card input {
+      width: 100%;
+      margin-bottom: 0.75rem;
+      padding: 0.65rem 0.75rem;
+      font: inherit;
+      color: var(--text);
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+    }
+    .app-header button {
+      font: inherit;
+      border: none;
+      border-radius: 6px;
+      padding: 0.4rem 0.75rem;
+      background: var(--border);
+      color: var(--text);
+      cursor: pointer;
+    }
+    #auth-screen { display: none; }
+    #app-shell { display: none; width: 100%; }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Data Validator</h1>
+  <section id="auth-screen" class="auth-card">
+    <h1>Login</h1>
+    <p class="sub">Sign in to Data Validator</p>
+    <form id="login-form">
+      <input id="username" name="username" type="text" autocomplete="username" placeholder="Username" required>
+      <input id="password" name="password" type="password" autocomplete="current-password" placeholder="Password" required>
+      <button type="submit">Log in</button>
+    </form>
+    <div id="auth-status"></div>
+  </section>
+
+  <main id="app-shell">
+    <div class="app-header">
+      <h1>Data Validator</h1>
+      <button type="button" id="logout-btn">Log out</button>
+    </div>
     <p class="sub">Twilio Lookup Identity Match</p>
 
     <form id="form">
@@ -235,6 +284,11 @@
   </main>
 
   <script>
+    const authScreen = document.getElementById('auth-screen');
+    const appShell = document.getElementById('app-shell');
+    const loginForm = document.getElementById('login-form');
+    const authStatusEl = document.getElementById('auth-status');
+    const logoutBtn = document.getElementById('logout-btn');
     const form = document.getElementById('form');
     const fileInput = document.getElementById('file');
     const fileNameEl = document.getElementById('fileName');
@@ -254,6 +308,42 @@
     let lastFileKey = null;
     let isProcessingIdentityMatch = false;
     const CHUNK_SIZE = 20;
+    let currentUser = null;
+
+    function setAuthStatus(className, html) {
+      authStatusEl.className = 'status ' + (className || '');
+      authStatusEl.innerHTML = html;
+    }
+
+    function showAuthScreen() {
+      authScreen.style.display = 'block';
+      appShell.style.display = 'none';
+      currentUser = null;
+      setStatus('', '');
+    }
+
+    function showAppScreen(username) {
+      authScreen.style.display = 'none';
+      appShell.style.display = 'block';
+      currentUser = username || null;
+    }
+
+    async function apiFetch(url, options = {}) {
+      const res = await fetch(url, options);
+      if (res.status === 401) {
+        showAuthScreen();
+        throw new Error('Session expired. Please log in again.');
+      }
+      return res;
+    }
+
+    async function checkAuth() {
+      const res = await fetch('/api/auth/me');
+      if (!res.ok) return showAuthScreen();
+      const data = await res.json().catch(() => ({}));
+      if (data.authenticated) showAppScreen(data.username);
+      else showAuthScreen();
+    }
 
     function setStatus(className, html) {
       statusEl.className = 'status ' + (className || '');
@@ -342,7 +432,7 @@
 
           setStatus('processing', `Processing Identity Match… ${beforeProcessed}/${rows.length} completed (chunk ${take})`);
 
-          const res = await fetch('/api/process-chunk', {
+          const res = await apiFetch('/api/process-chunk', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rows: chunk }),
@@ -459,7 +549,7 @@
       setStatus('processing', `Finding caller names for ${phonesToLookup.length} number(s)…`);
 
       try {
-        const res = await fetch('/api/caller-name', {
+        const res = await apiFetch('/api/caller-name', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ phoneNumbers: phonesToLookup }),
@@ -573,7 +663,7 @@
       const url = '/api/preview';
 
       try {
-        const res = await fetch(url, { method: 'POST', body: formData });
+        const res = await apiFetch(url, { method: 'POST', body: formData });
 
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -614,11 +704,40 @@
     }
 
     previewOnlyBtn.addEventListener('click', () => submitCsv(true));
+    logoutBtn.addEventListener('click', async () => {
+      try {
+        await fetch('/api/auth/logout', { method: 'POST' });
+      } catch (_) {}
+      showAuthScreen();
+    });
+
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('username').value.trim();
+      const password = document.getElementById('password').value;
+      setAuthStatus('processing', 'Logging in…');
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Login failed');
+        showAppScreen(data.username || username);
+        setAuthStatus('', '');
+        loginForm.reset();
+      } catch (err) {
+        setAuthStatus('error', err.message || 'Login failed');
+      }
+    });
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       submitCsv(false);
     });
+
+    checkAuth();
   </script>
 </body>
 </html>

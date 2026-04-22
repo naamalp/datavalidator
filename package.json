@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "dev:restart": "sh -c 'PID=$(lsof -ti tcp:3000 2>/dev/null); if [ -n \"$PID\" ]; then kill $PID; fi; node server.js'"
   },
   "engines": {
     "node": ">=18"

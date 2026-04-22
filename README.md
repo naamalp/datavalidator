@@ -37,6 +37,16 @@ Result columns appended to each row:
    - `TWILIO_ACCOUNT_SID` – from [Twilio Console](https://console.twilio.com) (Dashboard → Account Info). Must start with **`AC`**.
    - `TWILIO_AUTH_TOKEN` – from the same place (click the eye icon to reveal). Use the **Auth Token**, not API Key Secret or Client Secret.
 
+3. **App login users (no signup)**
+
+   Set `AUTH_USERS` in `.env` as comma-separated `username:password` pairs:
+
+   ```env
+   AUTH_USERS=admin:change-me,ops:strong-password
+   ```
+
+   To add a user later, append another `username:password` pair and restart the app.
+
 ## Troubleshooting: `identity_match_error: authenticate`
 
 This usually means Twilio rejected your credentials. Fix it by:

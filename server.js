@@ -7,6 +7,7 @@ const express = require('express');
 const multer = require('multer');
 const { parse } = require('csv-parse/sync');
 const twilio = require('twilio');
+const crypto = require('crypto');
 const { RequestClient } = twilio;
 
 /**
@@ -58,6 +59,90 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 function isResultEmpty(v) {
   return (v ?? '').toString().trim() === '';
+}
+
+const AUTH_COOKIE_NAME = 'dv_session';
+const AUTH_SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24h
+const authSessions = new Map();
+
+function parseAuthUsers(raw) {
+  const trimmed = (raw || '').trim();
+  if (!trimmed) return [];
+  return trimmed
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const idx = entry.indexOf(':');
+      if (idx <= 0) return null;
+      const username = entry.slice(0, idx).trim();
+      const password = entry.slice(idx + 1).trim();
+      if (!username || !password) return null;
+      return { username, password };
+    })
+    .filter(Boolean);
+}
+
+const AUTH_USERS = parseAuthUsers(process.env.AUTH_USERS);
+
+function parseCookies(req) {
+  const cookieHeader = req.headers.cookie || '';
+  const result = {};
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const val = part.slice(idx + 1).trim();
+    if (!key) continue;
+    result[key] = decodeURIComponent(val);
+  }
+  return result;
+}
+
+function getSession(req) {
+  const cookies = parseCookies(req);
+  const token = cookies[AUTH_COOKIE_NAME];
+  if (!token) return null;
+  const session = authSessions.get(token);
+  if (!session) return null;
+  if (Date.now() > session.expiresAt) {
+    authSessions.delete(token);
+    return null;
+  }
+  return { token, session };
+}
+
+function setAuthCookie(res, token) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieParts = [
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Lax',
+    `Max-Age=${Math.floor(AUTH_SESSION_TTL_MS / 1000)}`,
+  ];
+  if (isProd) cookieParts.push('Secure');
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function clearAuthCookie(res) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieParts = [
+    `${AUTH_COOKIE_NAME}=`,
+    'HttpOnly',
+    'Path=/',
+    'SameSite=Lax',
+    'Max-Age=0',
+  ];
+  if (isProd) cookieParts.push('Secure');
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function requireAuth(req, res, next) {
+  const auth = getSession(req);
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+  req.authUser = auth.session.username;
+  next();
 }
 
 function getTwilioClient() {
@@ -117,7 +202,7 @@ async function identityMatch(client, phoneNumber, firstName, lastName) {
   }
 }
 
-app.post('/api/process-chunk', express.json({ limit: '2mb' }), async (req, res) => {
+app.post('/api/process-chunk', requireAuth, express.json({ limit: '2mb' }), async (req, res) => {
   const rows = req.body?.rows;
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ error: 'rows array is required' });
@@ -237,7 +322,47 @@ const USE_MOCK_CALLER_NAME = /^(1|true|yes)$/i.test(
   (process.env.TWILIO_MOCK_CALLER_NAME || '').trim()
 );
 
-app.post('/api/caller-name', express.json(), async (req, res) => {
+app.get('/api/auth/me', (req, res) => {
+  const auth = getSession(req);
+  if (!auth) return res.json({ authenticated: false });
+  return res.json({ authenticated: true, username: auth.session.username });
+});
+
+app.post('/api/auth/login', express.json(), (req, res) => {
+  const username = (req.body?.username || '').toString().trim();
+  const password = (req.body?.password || '').toString();
+
+  if (AUTH_USERS.length === 0) {
+    return res.status(500).json({
+      error: 'No users configured. Set AUTH_USERS env var (e.g. "admin:password,user2:password2").',
+    });
+  }
+
+  const user = AUTH_USERS.find((u) => u.username === username && u.password === password);
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+
+  const token = crypto.randomBytes(24).toString('hex');
+  authSessions.set(token, {
+    username: user.username,
+    expiresAt: Date.now() + AUTH_SESSION_TTL_MS,
+  });
+  setAuthCookie(res, token);
+  return res.json({ ok: true, username: user.username });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const auth = getSession(req);
+  if (auth) authSessions.delete(auth.token);
+  clearAuthCookie(res);
+  res.json({ ok: true });
+});
+
+// Protect all data/processing endpoints.
+app.use('/api/process', requireAuth);
+
+app.post('/api/caller-name', requireAuth, express.json(), async (req, res) => {
   const phoneNumbers = req.body?.phoneNumbers;
   if (!Array.isArray(phoneNumbers) || phoneNumbers.length === 0) {
     return res.status(400).json({ error: 'phoneNumbers array is required' });
@@ -288,7 +413,7 @@ function parseAndValidateCsv(buffer) {
   return { header, records };
 }
 
-app.post('/api/preview', upload.single('csv'), (req, res) => {
+app.post('/api/preview', requireAuth, upload.single('csv'), (req, res) => {
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ error: 'No CSV file uploaded' });
   }
