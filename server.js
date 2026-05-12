@@ -62,7 +62,6 @@ function isResultEmpty(v) {
 }
 
 const AUTH_COOKIE_NAME = 'dv_session';
-const AUTH_SESSION_TTL_MS = 1000 * 60 * 60 * 24; // 24h
 const authSessions = new Map();
 
 function parseAuthUsers(raw) {
@@ -105,10 +104,6 @@ function getSession(req) {
   if (!token) return null;
   const session = authSessions.get(token);
   if (!session) return null;
-  if (Date.now() > session.expiresAt) {
-    authSessions.delete(token);
-    return null;
-  }
   return { token, session };
 }
 
@@ -119,7 +114,6 @@ function setAuthCookie(res, token) {
     'HttpOnly',
     'Path=/',
     'SameSite=Lax',
-    `Max-Age=${Math.floor(AUTH_SESSION_TTL_MS / 1000)}`,
   ];
   if (isProd) cookieParts.push('Secure');
   res.setHeader('Set-Cookie', cookieParts.join('; '));
@@ -346,7 +340,6 @@ app.post('/api/auth/login', express.json(), (req, res) => {
   const token = crypto.randomBytes(24).toString('hex');
   authSessions.set(token, {
     username: user.username,
-    expiresAt: Date.now() + AUTH_SESSION_TTL_MS,
   });
   setAuthCookie(res, token);
   return res.json({ ok: true, username: user.username });
