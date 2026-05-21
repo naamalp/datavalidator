@@ -47,6 +47,20 @@ Result columns appended to each row:
 
    To add a user later, append another `username:password` pair and restart the app.
 
+   Optional: set `AUTH_SECRET` to a long random string so login cookies stay valid across deploys/restarts (see `.env.example`).
+
+## Resumable enrichment (checkpoints)
+
+Identity Match runs in small chunks. Progress is saved automatically:
+
+- In the browser (`localStorage`) and on the server (`PUT /api/checkpoint`) per user + file
+- Before each chunk and after interruptions (auth loss, network error, etc.)
+- A partial CSV is downloaded when processing stops unexpectedly
+
+If you are logged out mid-run, log in again and use **Resume Identity Match** (or it may resume automatically). Rows that already have match columns filled are **not** sent to Twilio again.
+
+Re-upload the **same** CSV file (same name, size, and last-modified) to restore progress from checkpoint.
+
 ## Troubleshooting: `identity_match_error: authenticate`
 
 This usually means Twilio rejected your credentials. Fix it by:

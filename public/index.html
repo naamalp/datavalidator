@@ -307,7 +307,8 @@
     let lastResult = null;
     let lastFileKey = null;
     let isProcessingIdentityMatch = false;
-    const CHUNK_SIZE = 20;
+    const CHUNK_SIZE = 10;
+    const PENDING_RESUME_KEY = 'dv_pending_resume';
     let currentUser = null;
 
     function setAuthStatus(className, html) {
@@ -329,10 +330,15 @@
     }
 
     async function apiFetch(url, options = {}) {
-      const res = await fetch(url, options);
+      const res = await fetch(url, { credentials: 'same-origin', ...options });
       if (res.status === 401) {
+        await persistProgressOnInterruption();
         showAuthScreen();
-        throw new Error('Session expired. Please log in again.');
+        setAuthStatus(
+          'error',
+          'Not signed in (session lost or server restarted). Log in again — completed rows are saved. Use Resume Identity Match to continue without extra API calls.'
+        );
+        throw new Error('Not signed in. Log in and click Resume Identity Match to continue.');
       }
       return res;
     }
@@ -357,23 +363,85 @@
       return `datavalidator:${name}:${size}:${lm}`;
     }
 
-    function saveCheckpoint() {
+    async function saveCheckpoint() {
       if (!lastFileKey || !lastResult) return;
       try {
         localStorage.setItem(lastFileKey, JSON.stringify(lastResult));
       } catch (_) {
         // ignore quota errors
       }
+      try {
+        await fetch('/api/checkpoint', {
+          method: 'PUT',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileKey: lastFileKey, checkpoint: lastResult }),
+        });
+      } catch (_) {
+        // server checkpoint is best-effort (e.g. offline)
+      }
     }
 
-    function loadCheckpoint(fileKey) {
+    async function loadCheckpoint(fileKey) {
       if (!fileKey) return null;
+      let local = null;
       try {
         const raw = localStorage.getItem(fileKey);
-        return raw ? JSON.parse(raw) : null;
+        local = raw ? JSON.parse(raw) : null;
       } catch (_) {
-        return null;
+        local = null;
       }
+      try {
+        const res = await fetch(
+          '/api/checkpoint?fileKey=' + encodeURIComponent(fileKey),
+          { credentials: 'same-origin' }
+        );
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          return pickBetterCheckpoint(local, data.checkpoint);
+        }
+      } catch (_) {
+        // fall back to local only
+      }
+      return local;
+    }
+
+    function downloadPartialCsv() {
+      if (!lastResult) return;
+      downloadAsCsv();
+    }
+
+    async function persistProgressOnInterruption() {
+      if (!lastResult || !lastFileKey) return;
+      try {
+        sessionStorage.setItem(PENDING_RESUME_KEY, '1');
+      } catch (_) {}
+      await saveCheckpoint();
+      downloadPartialCsv();
+    }
+
+    function shouldAutoResume() {
+      try {
+        if (sessionStorage.getItem(PENDING_RESUME_KEY) !== '1') return false;
+      } catch (_) {
+        return false;
+      }
+      if (!lastResult) return false;
+      return nextUnprocessedIndex(lastResult.rows, lastResult.headers) !== -1;
+    }
+
+    function clearPendingResume() {
+      try {
+        sessionStorage.removeItem(PENDING_RESUME_KEY);
+      } catch (_) {}
+    }
+
+    async function tryAutoResumeAfterLogin() {
+      if (!shouldAutoResume()) return;
+      clearPendingResume();
+      if (!resultsSection.classList.contains('visible')) return;
+      setStatus('processing', 'Logged in. Resuming Identity Match from saved progress…');
+      await processIdentityMatchInChunks();
     }
 
     function rowIsProcessed(row, headers) {
@@ -405,6 +473,14 @@
       return n;
     }
 
+    function pickBetterCheckpoint(a, b) {
+      if (!a) return b;
+      if (!b) return a;
+      const countA = countProcessedRows(a.rows, a.headers);
+      const countB = countProcessedRows(b.rows, b.headers);
+      return countB > countA ? b : a;
+    }
+
     async function processIdentityMatchInChunks() {
       if (!lastResult || isProcessingIdentityMatch) return;
       const { headers, rows } = lastResult;
@@ -431,6 +507,8 @@
           const beforeProcessed = countProcessedRows(rows, headers);
 
           setStatus('processing', `Processing Identity Match… ${beforeProcessed}/${rows.length} completed (chunk ${take})`);
+
+          await saveCheckpoint();
 
           const res = await apiFetch('/api/process-chunk', {
             method: 'POST',
@@ -460,12 +538,17 @@
           idx = nextUnprocessedIndex(rows, headers);
         }
 
+        clearPendingResume();
         setStatus('success', `Done. ${rows.length} row(s) processed. Preview below.`);
       } catch (err) {
         // Keep partial results in-table and allow resuming without reprocessing completed rows.
-        saveCheckpoint();
+        await persistProgressOnInterruption();
         resumeProcessBtn.style.display = 'inline-block';
-        setStatus('error', (err.message || 'Processing failed.') + ' Partial results kept. Click “Resume Identity Match” to continue.');
+        setStatus(
+          'error',
+          (err.message || 'Processing failed.') +
+            ' Partial results saved (CSV downloaded). Click “Resume Identity Match” to continue without re-billing completed rows.'
+        );
       } finally {
         isProcessingIdentityMatch = false;
         submitBtn.disabled = false;
@@ -526,22 +609,40 @@
       const lastMatchIdx = headers.indexOf('last_name_match');
       if (firstMatchIdx === -1 || lastMatchIdx === -1) return;
 
+      let callerNameIdx = headers.indexOf('caller_name');
+      if (callerNameIdx === -1) {
+        headers.push('caller_name');
+        callerNameIdx = headers.length - 1;
+        for (const row of rows) row.push('');
+      }
+
       const phonesToLookup = [];
+      const knownResults = {};
       const seen = new Set();
       for (const row of rows) {
         const first = row[firstMatchIdx];
         const last = row[lastMatchIdx];
         if (isNoMatchOrBlank(first) && isNoMatchOrBlank(last)) {
           const phone = (row[phoneCol] ?? '').toString().trim();
-          if (phone && !seen.has(phone)) {
-            seen.add(phone);
-            phonesToLookup.push(phone);
+          const existing = (row[callerNameIdx] ?? '').toString().trim();
+          if (!phone || seen.has(phone)) continue;
+          seen.add(phone);
+          if (existing) {
+            knownResults[phone] = existing;
+            continue;
           }
+          phonesToLookup.push(phone);
         }
       }
 
       if (phonesToLookup.length === 0) {
-        setStatus('success', 'No rows where both first and last name match are no_match or blank.');
+        await saveCheckpoint();
+        setStatus(
+          'success',
+          Object.keys(knownResults).length
+            ? 'Caller names already saved for applicable rows.'
+            : 'No rows where both first and last name match are no_match or blank.'
+        );
         return;
       }
 
@@ -552,7 +653,7 @@
         const res = await apiFetch('/api/caller-name', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phoneNumbers: phonesToLookup }),
+          body: JSON.stringify({ phoneNumbers: phonesToLookup, knownResults }),
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
@@ -567,13 +668,6 @@
           phoneToName.set(key, err ? `Error: ${err}` : name);
         }
 
-        let callerNameIdx = headers.indexOf('caller_name');
-        if (callerNameIdx === -1) {
-          headers.push('caller_name');
-          callerNameIdx = headers.length - 1;
-          for (const row of rows) row.push('');
-        }
-
         for (const row of rows) {
           const first = row[firstMatchIdx];
           const last = row[lastMatchIdx];
@@ -586,8 +680,10 @@
         lastResult.headers = headers;
         lastResult.rows = rows;
         renderTable(headers, rows);
-        setStatus('success', `Caller name lookup done. Filled ${phonesToLookup.length} number(s).`);
+        await saveCheckpoint();
+        setStatus('success', `Caller name lookup done. Filled ${phonesToLookup.length} new number(s).`);
       } catch (err) {
+        await saveCheckpoint();
         setStatus('error', err.message || 'Caller name lookup failed.');
       } finally {
         findNamesBtn.disabled = false;
@@ -675,7 +771,7 @@
         lastFileKey = buildFileKey(file);
 
         // If we have a checkpoint for this exact file, merge it (so we can resume after refresh).
-        const checkpoint = loadCheckpoint(lastFileKey);
+        const checkpoint = await loadCheckpoint(lastFileKey);
         if (checkpoint && Array.isArray(checkpoint.headers) && Array.isArray(checkpoint.rows)) {
           // Prefer checkpoint rows (they contain partial results), but keep latest filename.
           lastResult = { ...checkpoint, filename: preview.filename };
@@ -692,10 +788,11 @@
         } else {
           // Start chunked processing after preview is loaded.
           setStatus('processing', `Starting Identity Match… ${lastResult.rows.length} row(s).`);
-          saveCheckpoint();
+          await saveCheckpoint();
           await processIdentityMatchInChunks();
         }
       } catch (err) {
+        if (lastResult) await persistProgressOnInterruption();
         setStatus('error', err.message || 'Something went wrong.');
       } finally {
         submitBtn.disabled = false;
@@ -727,6 +824,7 @@
         showAppScreen(data.username || username);
         setAuthStatus('', '');
         loginForm.reset();
+        await tryAutoResumeAfterLogin();
       } catch (err) {
         setAuthStatus('error', err.message || 'Login failed');
       }

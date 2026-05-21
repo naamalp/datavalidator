@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
   require('dotenv').config({ path: path.join(__dirname, '.env.example') });
@@ -62,7 +63,24 @@ function isResultEmpty(v) {
 }
 
 const AUTH_COOKIE_NAME = 'dv_session';
-const authSessions = new Map();
+// Long-lived cookie (no idle/expiry validation on the token itself).
+const AUTH_COOKIE_MAX_AGE_SEC = 60 * 60 * 24 * 365 * 10;
+
+function getAuthSecret() {
+  const explicit = (process.env.AUTH_SECRET || '').trim();
+  if (explicit) return explicit;
+  const users = (process.env.AUTH_USERS || '').trim();
+  if (users) {
+    return crypto.createHash('sha256').update(`dv-auth:${users}`).digest('hex');
+  }
+  return crypto.createHash('sha256').update('dv-auth:dev-only-change-me').digest('hex');
+}
+
+const AUTH_SECRET = getAuthSecret();
+
+const CHECKPOINT_DIR = process.env.VERCEL
+  ? path.join('/tmp', 'datavalidator-checkpoints')
+  : path.join(__dirname, '.checkpoints');
 
 function parseAuthUsers(raw) {
   const trimmed = (raw || '').trim();
@@ -98,11 +116,41 @@ function parseCookies(req) {
   return result;
 }
 
+function createSessionToken(username) {
+  const payload = JSON.stringify({ u: username });
+  const payloadB64 = Buffer.from(payload, 'utf8').toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(payloadB64).digest('base64url');
+  return `${payloadB64}.${sig}`;
+}
+
+function verifySessionToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const dot = token.indexOf('.');
+  if (dot <= 0) return null;
+  const payloadB64 = token.slice(0, dot);
+  const sig = token.slice(dot + 1);
+  const expected = crypto.createHmac('sha256', AUTH_SECRET).update(payloadB64).digest('base64url');
+  try {
+    const sigBuf = Buffer.from(sig, 'utf8');
+    const expBuf = Buffer.from(expected, 'utf8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) return null;
+  } catch (_) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+    const username = (payload?.u || '').toString().trim();
+    return username ? { username } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function getSession(req) {
   const cookies = parseCookies(req);
   const token = cookies[AUTH_COOKIE_NAME];
   if (!token) return null;
-  const session = authSessions.get(token);
+  const session = verifySessionToken(token);
   if (!session) return null;
   return { token, session };
 }
@@ -114,9 +162,38 @@ function setAuthCookie(res, token) {
     'HttpOnly',
     'Path=/',
     'SameSite=Lax',
+    `Max-Age=${AUTH_COOKIE_MAX_AGE_SEC}`,
   ];
   if (isProd) cookieParts.push('Secure');
   res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+function checkpointFilePath(username, fileKey) {
+  const userHash = crypto.createHash('sha256').update(username).digest('hex').slice(0, 16);
+  const keyHash = crypto.createHash('sha256').update(fileKey).digest('hex');
+  return path.join(CHECKPOINT_DIR, `${userHash}_${keyHash}.json`);
+}
+
+function readCheckpoint(username, fileKey) {
+  const fp = checkpointFilePath(username, fileKey);
+  if (!fs.existsSync(fp)) return null;
+  try {
+    const raw = fs.readFileSync(fp, 'utf8');
+    const data = JSON.parse(raw);
+    if (!data || !Array.isArray(data.headers) || !Array.isArray(data.rows)) return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeCheckpoint(username, fileKey, checkpoint) {
+  if (!fileKey || !checkpoint || !Array.isArray(checkpoint.headers) || !Array.isArray(checkpoint.rows)) {
+    throw new Error('Invalid checkpoint payload');
+  }
+  fs.mkdirSync(CHECKPOINT_DIR, { recursive: true });
+  const fp = checkpointFilePath(username, fileKey);
+  fs.writeFileSync(fp, JSON.stringify(checkpoint), 'utf8');
 }
 
 function clearAuthCookie(res) {
@@ -337,19 +414,33 @@ app.post('/api/auth/login', express.json(), (req, res) => {
     return res.status(401).json({ error: 'Invalid username or password' });
   }
 
-  const token = crypto.randomBytes(24).toString('hex');
-  authSessions.set(token, {
-    username: user.username,
-  });
+  const token = createSessionToken(user.username);
   setAuthCookie(res, token);
   return res.json({ ok: true, username: user.username });
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  const auth = getSession(req);
-  if (auth) authSessions.delete(auth.token);
+app.post('/api/auth/logout', (_req, res) => {
   clearAuthCookie(res);
   res.json({ ok: true });
+});
+
+app.get('/api/checkpoint', requireAuth, (req, res) => {
+  const fileKey = (req.query.fileKey || '').toString().trim();
+  if (!fileKey) return res.status(400).json({ error: 'fileKey query parameter is required' });
+  const checkpoint = readCheckpoint(req.authUser, fileKey);
+  return res.json({ checkpoint });
+});
+
+app.put('/api/checkpoint', requireAuth, express.json({ limit: '12mb' }), (req, res) => {
+  const fileKey = (req.body?.fileKey || '').toString().trim();
+  const checkpoint = req.body?.checkpoint;
+  if (!fileKey) return res.status(400).json({ error: 'fileKey is required' });
+  try {
+    writeCheckpoint(req.authUser, fileKey, checkpoint);
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(400).json({ error: e.message || 'Failed to save checkpoint' });
+  }
 });
 
 // Protect all data/processing endpoints.
@@ -361,16 +452,51 @@ app.post('/api/caller-name', requireAuth, express.json(), async (req, res) => {
     return res.status(400).json({ error: 'phoneNumbers array is required' });
   }
 
-  if (USE_MOCK_CALLER_NAME) {
-    const results = phoneNumbers.map((phone) => {
+  const knownResults = req.body?.knownResults;
+  const knownByPhone = new Map();
+  if (knownResults && typeof knownResults === 'object' && !Array.isArray(knownResults)) {
+    for (const [phone, name] of Object.entries(knownResults)) {
       const p = (phone ?? '').toString().trim();
-      return {
+      const n = (name ?? '').toString().trim();
+      if (p && n) knownByPhone.set(p, n);
+    }
+  }
+
+  const results = [];
+  const toLookup = [];
+
+  for (const phone of phoneNumbers) {
+    const p = (phone ?? '').toString().trim();
+    if (!p) {
+      results.push({ phone: p, caller_name: '', caller_type: '', error: 'No phone number' });
+      continue;
+    }
+    if (knownByPhone.has(p)) {
+      results.push({
+        phone: p,
+        caller_name: knownByPhone.get(p),
+        caller_type: '',
+        error: '',
+        cached: true,
+      });
+      continue;
+    }
+    toLookup.push(p);
+  }
+
+  if (toLookup.length === 0) {
+    return res.json({ results });
+  }
+
+  if (USE_MOCK_CALLER_NAME) {
+    for (const p of toLookup) {
+      results.push({
         phone: p,
         caller_name: p ? `Mock Caller (${p.slice(-4)})` : '',
         caller_type: 'CONSUMER',
         error: '',
-      };
-    });
+      });
+    }
     return res.json({ results });
   }
 
@@ -380,8 +506,7 @@ app.post('/api/caller-name', requireAuth, express.json(), async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
-  const results = [];
-  for (const phone of phoneNumbers) {
+  for (const phone of toLookup) {
     const r = await callerNameLookup(client, phone);
     results.push(r);
   }
